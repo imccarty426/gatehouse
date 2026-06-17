@@ -31,6 +31,7 @@ export function loadRelayConfig(path: string): RelayConfig {
     if (!p?.oauth || typeof p.oauth !== "object") throw new Error(`relay config: provider ${name}: missing oauth block`);
     for (const k of REQUIRED) if (p.oauth[k] == null) throw new Error(`relay config: provider ${name}: oauth.${k} is required`);
     if (!Array.isArray(p.oauth.scopes) || p.oauth.scopes.length === 0) throw new Error(`relay config: provider ${name}: oauth.scopes must be a non-empty list`);
+    if (p.oauth.scopes.some((s: any) => typeof s !== "string" || !s.trim())) throw new Error(`relay config: provider ${name}: oauth.scopes entries must be non-empty strings`);
     for (const f of URL_FIELDS) assertUrl(name, f, p.oauth[f]);
     if (!p.upstreams || typeof p.upstreams !== "object" || Object.keys(p.upstreams).length === 0) throw new Error(`relay config: provider ${name}: at least one upstream is required`);
     for (const [un, u] of Object.entries<any>(p.upstreams)) {

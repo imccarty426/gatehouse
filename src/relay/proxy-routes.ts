@@ -29,6 +29,7 @@ export function proxyRoutes(deps: { config: RelayConfig; managers: Record<string
     }
 
     const tail = c.req.path.split(`/relay/${pname}/${uname}`)[1] ?? "";
+    // Targets are config-derived (relays.yaml), never caller-derived, so SSRF is out of scope by construction; egress is constrained at the deployment layer (Cilium). The bare route yields an empty tail → target = the configured upstream url.
     const target = new URL(upstream.url.replace(/\/$/, "") + tail);
     new URL(c.req.url).searchParams.forEach((v, k) => target.searchParams.set(k, v));
 

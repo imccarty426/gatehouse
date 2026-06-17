@@ -23,6 +23,7 @@ export class TokenManager {
   async getAccessToken(): Promise<string> {
     if (this.accessToken && this.now() < this.expiresAtMs - 60_000) return this.accessToken;
     if (this.inflight) return this.inflight;
+    // Single-flight: concurrent callers share one in-flight refresh. .finally() clears it so a FAILED refresh does not poison the cache (next call retries); accessToken/expiresAtMs are set only on success.
     this.inflight = this.doRefresh().finally(() => { this.inflight = undefined; });
     return this.inflight;
   }
@@ -36,6 +37,7 @@ export class TokenManager {
       if (e instanceof TokenEndpointError && e.status === 400 && /invalid_grant/.test(e.body)) throw new RefreshTokenExpiredError(this.oauthName);
       throw e;
     }
+    // Write back a rotated refresh token (atomic, read-back-verified) BEFORE caching the new access token, so a write-back failure never leaves us serving a token whose refresh credential wasn't persisted.
     if (t.refreshToken && t.refreshToken !== refreshToken) await this.atomicWriteBack(t.refreshToken);
     this.accessToken = t.accessToken; this.expiresAtMs = this.now() + t.expiresInSec * 1000;
     return t.accessToken;

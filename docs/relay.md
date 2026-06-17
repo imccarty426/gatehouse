@@ -13,12 +13,14 @@ The relay runs as a **separate entrypoint** (`relay.ts`) — it does not require
 **Tool call (in-cluster, no internet):**
 
 ```
-Open WebUI → GET /relay/google/drive/mcp/v1
+Open WebUI → GET /relay/google/drive
            → token-manager (cached or refreshed access token)
            → inject Authorization: Bearer <token>
            → transparent pass-through → drivemcp.googleapis.com
            → raw JSON-RPC body returned verbatim to Open WebUI
 ```
+
+The consumer connects to the bare `/relay/:provider/:upstream`; the relay forwards to that upstream's configured `url` (the full MCP endpoint). Any extra path after the bare route is appended to the upstream `url`.
 
 There is no response envelope. The relay does not buffer or re-wrap the upstream body — it streams the response verbatim (content-type preserved). See [Security model — Body-size cap](#body-size-cap) for the tradeoff.
 
@@ -60,7 +62,7 @@ providers:
       refresh_token_ref:      <secret-ref>  # Read AND written back by SecretsBackend
     upstreams:
       <upstream-name>:
-        url: <URL>                          # Base URL for this upstream MCP server
+        url: <URL>                          # Full URL of this upstream MCP endpoint (e.g. https://drivemcp.googleapis.com/mcp/v1)
       # … more upstreams
   # … more providers
 ```
@@ -103,6 +105,8 @@ Handles all MCP methods. Accepts any HTTP method (`ALL`).
 | `ALL /relay/:provider/:upstream/*` | ANY | Resolves the upstream URL from config, retrieves (or refreshes) a valid access token via the token manager, injects the bearer header, and transparently proxies the request and response. |
 
 Path matching: `:provider` must match a key in `providers`; `:upstream` must match a key in `providers.<name>.upstreams`. Unknown provider or upstream → `404`.
+
+**Consumer URL contract:** The consumer connects to the bare `/relay/:provider/:upstream` route. The relay appends any extra path tail to the upstream's configured `url` (the full MCP endpoint). For example, a consumer connecting to `/relay/google/drive` with upstream `url: https://drivemcp.googleapis.com/mcp/v1` forwards to `https://drivemcp.googleapis.com/mcp/v1`. The full endpoint path belongs in the upstream `url` config, not in the consumer's connection URL.
 
 **Relay routes are in-cluster only.** The ingress must route `/auth/*` to the public hostname (behind CF Access) and expose `/relay/*` only as a ClusterIP service accessible to the MCP consumer. The relay also refuses `/relay/*` with `403` when the `RELAY_PUBLIC_HEADER` marker is present — defense-in-depth guard (see [Security model — Public-ingress guard](#public-ingress-guard)).
 
