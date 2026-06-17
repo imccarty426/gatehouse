@@ -52,7 +52,9 @@ export class TokenManager {
     const { id, secret } = await this.creds();
     const t = await exchangeCodeForTokens(this.provider.oauth, id, secret, code, codeVerifier);
     if (!t.refreshToken) throw new Error(`provider '${this.oauthName}' returned no refresh token (need access_type=offline&prompt=consent)`);
-    const commit = async () => { await this.atomicWriteBack(t.refreshToken!); this.accessToken = t.accessToken; this.expiresAtMs = this.now() + t.expiresInSec * 1000; };
+    // commit persists ONLY the refresh token; getAccessToken() is the single source of access tokens
+    // (it refreshes the just-persisted refresh token on first proxy use). Do not cache the code-exchange access token.
+    const commit = async () => { await this.atomicWriteBack(t.refreshToken!); };
     return { email: t.email, commit };
   }
 }
