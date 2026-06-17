@@ -4,7 +4,6 @@ import { Hono } from "hono";
 import { proxyRoutes } from "../src/relay/proxy-routes";
 import { TokenManager } from "../src/relay/token-manager";
 import { MemorySecretsBackend } from "../src/relay/secrets/types";
-import { Database } from "bun:sqlite";
 import { initDB } from "../src/db/init";
 import { AuditLog } from "../src/audit/logger";
 import type { RelayConfig } from "../src/relay/config";

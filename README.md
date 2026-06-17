@@ -97,6 +97,14 @@ Skip pasting `role_id` / `secret_id` into chat:
 
 The agent curls the one-time URL, exchanges the token for rotated credentials, writes them into its harness, and installs a `gatehouse` skill so future sessions know how to use the vault. Details: [gatehouse.to/docs/authentication](https://gatehouse.to/docs/authentication/).
 
+## OAuth MCP Relay
+
+Gatehouse includes an **OAuth MCP relay** — a separate deployment mode (`relay.ts`) that owns the full OAuth token lifecycle (mint, refresh, persist, re-auth) for hosted MCP servers that require OAuth 2.0 bearer authentication. MCP consumers (e.g. Open WebUI) connect to the relay with **No Auth**; the relay silently injects a valid bearer on every proxied request.
+
+Ships with a Google Workspace provider covering six hosted MCP servers (Drive, Gmail, Calendar, Docs, Sheets, Slides) under a single OAuth token. Adding another OAuth 2.0 authorization-code provider is config-only for providers that fit the standard shape.
+
+See **[docs/relay.md](docs/relay.md)** for the full provider reference: config schema, route reference, environment variables, the `SecretsBackend` extension point, and the security model (CF Access + NetworkPolicy are deployment responsibilities; the response path streams without a body-size cap).
+
 ## Docs
 
 Full documentation lives at **[gatehouse.to](https://gatehouse.to)**.

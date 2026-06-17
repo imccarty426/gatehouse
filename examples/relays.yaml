@@ -1,0 +1,97 @@
+# relays.yaml — OAuth MCP Relay provider configuration
+#
+# Point RELAY_CONFIG_PATH at this file. Secrets are *references*, never values.
+# The auth URL is built solely from this file — no request-supplied redirect/next
+# params are ever accepted (open-redirect defense).
+#
+# Copy this file into your infrastructure repo and substitute real op:// paths
+# and your redirect URI. This example contains no real credentials or hostnames.
+
+providers:
+  # ---------------------------------------------------------------------------
+  # Provider: google
+  # Covers all 6 hosted Google Workspace MCP servers with a single OAuth token.
+  # One consent grants Drive + Gmail + Calendar + Docs + Sheets + Slides.
+  # ---------------------------------------------------------------------------
+  google:
+    oauth:
+      # OAuth 2.0 authorization endpoint (Google's consent page).
+      authorization_endpoint: https://accounts.google.com/o/oauth2/v2/auth
+
+      # Token endpoint — used for both code→token exchange and refresh.
+      token_endpoint: https://oauth2.googleapis.com/token
+
+      # Must match an authorized redirect URI registered on your GCP OAuth client.
+      # Substitute your real public hostname before deploying.
+      redirect_uri: https://gatehouse-relay.example.com/auth/google/callback
+
+      # Scope union: supply the union of every upstream's required scopes here.
+      # The relay does NOT enforce per-upstream subsets — one token covers all.
+      scopes:
+        - https://www.googleapis.com/auth/drive
+        - https://www.googleapis.com/auth/gmail.readonly
+        - https://www.googleapis.com/auth/gmail.send
+        - https://www.googleapis.com/auth/calendar
+        - https://www.googleapis.com/auth/documents
+        - https://www.googleapis.com/auth/spreadsheets
+        - https://www.googleapis.com/auth/presentations
+
+      # REQUIRED for Google to issue a refresh token.
+      # access_type=offline requests a refresh token; prompt=consent forces the
+      # consent screen even if the user previously granted access, ensuring a
+      # fresh refresh token is returned on every re-auth.
+      auth_url_params:
+        access_type: offline
+        prompt: consent
+
+      # Escape hatch: extra parameters sent in the token endpoint POST body.
+      # Examples: Auth0 `audience`, Azure AD `resource`.
+      # Leave empty ({}) for standard Google OAuth.
+      token_url_params: {}
+
+      # Escape hatch: name of the HTTP header used to inject the bearer token
+      # into upstream requests. Default: "Authorization" (value: "Bearer <tok>").
+      # Override only if an upstream expects a non-standard header name.
+      header_name: Authorization
+
+      # Identity-bind target: the email that the granted token's identity MUST
+      # match before the refresh token is persisted. Rejects mismatches before
+      # any write, even if CF Access is misconfigured.
+      # Substitute your real email before deploying.
+      owner_email: owner@example.com
+
+      # Secret references — resolved by the configured SecretsBackend at runtime.
+      # The relay never logs or returns resolved secret values.
+      # Format: op://<vault>/<item>/<field>  (1Password SDK reference)
+      client_id_ref:     op://gatehouse/google-oauth/client_id
+      client_secret_ref: op://gatehouse/google-oauth/client_secret
+
+      # The refresh token is written back here by the relay after each re-auth.
+      # ESO cannot write back — use the SDK backend (OnePasswordBackend) for this
+      # ref; do not point ESO at the same item (split-brain risk).
+      refresh_token_ref: op://gatehouse/google-oauth/refresh_token
+
+    # -------------------------------------------------------------------------
+    # Upstreams: one entry per hosted Google Workspace MCP server.
+    # Each is accessible at /relay/google/<name>/* (in-cluster only).
+    # Open WebUI registers each upstream as its own MCP connection (No Auth).
+    # -------------------------------------------------------------------------
+    upstreams:
+      drive:
+        url: https://drivemcp.googleapis.com/mcp/v1
+      gmail:
+        url: https://gmailmcp.googleapis.com/mcp/v1
+      calendar:
+        url: https://calendarmcp.googleapis.com/mcp/v1
+      docs:
+        url: https://docsmcp.googleapis.com/mcp/v1
+      sheets:
+        url: https://sheetsmcp.googleapis.com/mcp/v1
+      slides:
+        url: https://slidesmcp.googleapis.com/mcp/v1
+
+# To add another OAuth provider (e.g. GitHub, Notion), add a sibling block
+# under `providers:` following the same shape. Providers that use OAuth 2.0
+# authorization-code + refresh-token + bearer-header work config-only.
+# Providers with fundamentally different token semantics may require a code
+# change — see docs/relay.md §Extensibility.
