@@ -13,6 +13,7 @@
     "site:build": "cd site && bun run sync-docs && bun run build && bun run publish"
   },
   "dependencies": {
+    "@1password/sdk": "^0.4.0",
     "hono": "^4.7.0",
     "ioredis": "^5.10.1",
     "jose": "^6.0.0",
