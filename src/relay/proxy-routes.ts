@@ -139,6 +139,14 @@ export function proxyRoutes(deps: { config: RelayConfig; managers: Record<string
     const out = new Headers();
     for (const h of ["content-type", "cache-control", "mcp-session-id", "mcp-protocol-version"]) { const v = upstreamRes.headers.get(h); if (v) out.set(h, v); }
 
+    // --- alert on sensitive-write: allowed tools/call in alertTools list ---
+    if (rpcMethod === "tools/call" && rpcParamsName && upstream.alertTools?.includes(rpcParamsName)) {
+      notifyDiscord({
+        action: "relay.tool.sensitive",
+        metadata: { tool: rpcParamsName, target: summarizeTarget(rpcParams) },
+      });
+    }
+
     // --- response interception: only buffer+filter tools/list ---
     if (rpcMethod === "tools/list" && upstream.toolDenylist?.length) {
       const ct = upstreamRes.headers.get("content-type") ?? "";

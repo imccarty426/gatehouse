@@ -247,3 +247,116 @@ describe("relay proxy routes — audit enrichment + Discord sink (Task 5)", () =
     expect(res.status).toBe(403); // still denied
   });
 });
+
+// ---------------------------------------------------------------------------
+// Helper: upstream with alertTools configured (no denylist — this is the
+// allowed-but-sensitive path, distinct from the block-and-deny path).
+// ---------------------------------------------------------------------------
+function makeAppWithAlertTools() {
+  let upstreamCalled = false;
+  let responseFactory: () => Response = () =>
+    new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }), {
+      headers: { "content-type": "application/json" },
+    });
+  upstream = Bun.serve({ port: 0, async fetch() { upstreamCalled = true; return responseFactory(); } });
+  tokenSrv = Bun.serve({ port: 0, fetch: () => Response.json({ access_token: "AT-LIVE", expires_in: 3600 }) });
+  const config: RelayConfig = {
+    providers: {
+      google: {
+        oauth: {
+          authorization_endpoint: "https://x/authorize",
+          token_endpoint: `http://localhost:${tokenSrv!.port}/token`,
+          redirect_uri: "https://relay.example.com/auth/google/callback",
+          scopes: ["s1"], owner_email: "o@e.com",
+          client_id_ref: "op://v/i/cid", client_secret_ref: "op://v/i/sec", refresh_token_ref: "op://v/i/rt",
+        },
+        upstreams: {
+          workspace: {
+            url: `http://localhost:${upstream!.port}`,
+            // share_file is sensitive-write but NOT denied — it passes through, and Discord is notified.
+            alertTools: ["share_file"],
+          },
+        },
+      },
+    },
+  };
+  const secrets = new MemorySecretsBackend({ "op://v/i/cid": "cid", "op://v/i/sec": "sec", "op://v/i/rt": "RT0" });
+  dir = mkdtempSync(join(tmpdir(), "relaydb-")); const db = initDB(dir);
+  const managers = { google: new TokenManager(config.providers.google, "google", secrets) };
+  const app = new Hono(); app.route("/", proxyRoutes({ config, managers, audit: new AuditLog(db) }));
+  return {
+    app,
+    getUpstreamCalled: () => upstreamCalled,
+    upstreamResponds: (body: object, ct = "application/json") => {
+      responseFactory = () => new Response(JSON.stringify(body), { headers: { "content-type": ct } });
+    },
+  };
+}
+
+describe("relay proxy routes — alertTools Discord trigger (configurable sensitive-write)", () => {
+  test("allowed tools/call to alertTools tool fires Discord webhook with tool name, NOT the token", async () => {
+    const discordBodies: string[] = [];
+    discordSrv = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        discordBodies.push(await req.text());
+        return new Response(null, { status: 204 });
+      },
+    });
+    process.env.DISCORD_AUDIT_WEBHOOK_URL = `http://localhost:${discordSrv.port}/webhook`;
+
+    const { app, upstreamResponds } = makeAppWithAlertTools();
+    upstreamResponds({ jsonrpc: "2.0", id: 1, result: { ok: true } });
+
+    const res = await app.request("/relay/google/workspace/", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "share_file", arguments: { fileId: "file-abc" } } }),
+    });
+    // The call must succeed — alertTools does NOT block
+    expect(res.status).toBe(200);
+
+    // Give the async webhook POST a moment to arrive
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(discordBodies.length).toBeGreaterThanOrEqual(1);
+    const body = discordBodies[0];
+    expect(body).toContain("share_file");
+    // Token must NEVER appear in the Discord payload
+    expect(body).not.toMatch(/Bearer|AT-LIVE/);
+  });
+
+  test("allowed tools/call to NON-alert tool does NOT fire Discord", async () => {
+    const discordBodies: string[] = [];
+    discordSrv = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        discordBodies.push(await req.text());
+        return new Response(null, { status: 204 });
+      },
+    });
+    process.env.DISCORD_AUDIT_WEBHOOK_URL = `http://localhost:${discordSrv.port}/webhook`;
+
+    const { app, upstreamResponds } = makeAppWithAlertTools();
+    upstreamResponds({ jsonrpc: "2.0", id: 2, result: { ok: true } });
+
+    const res = await app.request("/relay/google/workspace/", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "search_drive_files", arguments: {} } }),
+    });
+    expect(res.status).toBe(200);
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(discordBodies.length).toBe(0);
+  });
+
+  test("alertTools call is still forwarded upstream (not blocked)", async () => {
+    const { app, upstreamResponds, getUpstreamCalled } = makeAppWithAlertTools();
+    upstreamResponds({ jsonrpc: "2.0", id: 3, result: { ok: true } });
+
+    await app.request("/relay/google/workspace/", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "share_file", arguments: {} } }),
+    });
+    expect(getUpstreamCalled()).toBe(true);
+  });
+});
