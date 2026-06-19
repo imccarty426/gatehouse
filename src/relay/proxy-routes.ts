@@ -21,15 +21,52 @@ export function filterToolsInSse(text: string, denylist: string[]): string {
   }).join("\n");
 }
 
+/**
+ * Extract a non-sensitive target identifier from tools/call params.
+ * Never includes auth tokens, full file contents, or query payloads.
+ * Returns a short opaque identifier (fileId, calendarId, recipient address) or "".
+ */
+export function summarizeTarget(params: any): string {
+  if (!params || typeof params !== "object") return "";
+  const args = params.arguments ?? params.args ?? {};
+  if (typeof args !== "object" || args === null) return "";
+  // Ordered list of well-known non-sensitive identifier fields
+  for (const key of ["fileId", "file_id", "calendarId", "calendar_id", "eventId", "event_id", "recipient", "to", "threadId", "thread_id", "driveId", "drive_id", "folderId", "folder_id", "documentId", "document_id", "spreadsheetId", "spreadsheet_id"]) {
+    const v = args[key];
+    if (typeof v === "string" && v.length > 0 && v.length < 200) return v;
+  }
+  return "";
+}
+
+/**
+ * Post a compact notification to Discord for sensitive/denied events.
+ * No-op if DISCORD_AUDIT_WEBHOOK_URL is not set. Never includes token material.
+ */
+export function notifyDiscord(entry: { action: string; metadata?: Record<string, string> }): void {
+  const url = process.env.DISCORD_AUDIT_WEBHOOK_URL;
+  if (!url) return;
+  const tool = entry.metadata?.tool ?? "";
+  const target = entry.metadata?.target ?? "";
+  const content = `**gatehouse alert** | action: \`${entry.action}\` | tool: \`${tool || "(none)"}\`${target ? ` | target: \`${target}\`` : ""}`;
+  // Fire-and-forget; errors are non-fatal (audit DB is the source of truth)
+  fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ content }),
+  }).catch(() => { /* swallow — Discord is best-effort */ });
+}
+
 /** Parse request body as JSON-RPC. Returns metadata for interception; never throws. */
-export function interceptRequest(bodyBytes: ArrayBuffer, denylist: string[]): { deniedToolCall: boolean; rpc?: any; toolName?: string; rpcMethod?: string } {
+export function interceptRequest(bodyBytes: ArrayBuffer, denylist: string[]): { deniedToolCall: boolean; rpc?: any; toolName?: string; rpcMethod?: string; rpcParamsName?: string; rpcParams?: any } {
   try {
     const rpc = JSON.parse(new TextDecoder().decode(bodyBytes));
     const rpcMethod: string | undefined = rpc?.method;
-    if (rpcMethod === "tools/call" && denylist.includes(rpc?.params?.name)) {
-      return { deniedToolCall: true, rpc, toolName: String(rpc?.params?.name), rpcMethod };
+    const rpcParams = rpc?.params;
+    const rpcParamsName: string | undefined = rpcParams?.name;
+    if (rpcMethod === "tools/call" && denylist.includes(rpcParamsName!)) {
+      return { deniedToolCall: true, rpc, toolName: String(rpcParamsName), rpcMethod, rpcParamsName, rpcParams };
     }
-    return { deniedToolCall: false, rpc, rpcMethod };
+    return { deniedToolCall: false, rpc, rpcMethod, rpcParamsName, rpcParams };
   } catch { return { deniedToolCall: false }; }
 }
 
@@ -69,21 +106,35 @@ export function proxyRoutes(deps: { config: RelayConfig; managers: Record<string
     // --- request interception ---
     let body: ArrayBuffer | undefined;
     let rpcMethod: string | undefined;
+    let rpcParamsName: string | undefined;
+    let rpcParams: any;
     if (method !== "GET" && method !== "HEAD") {
       const raw = await c.req.arrayBuffer();
       body = raw;
-      if ((c.req.header("content-type") ?? "").includes("json") && upstream.toolDenylist?.length) {
-        const intercepted = interceptRequest(raw, upstream.toolDenylist);
+      if ((c.req.header("content-type") ?? "").includes("json")) {
+        const intercepted = interceptRequest(raw, upstream.toolDenylist ?? []);
         rpcMethod = intercepted.rpcMethod;
-        if (intercepted.deniedToolCall) {
-          audit.log({ identity: provider.oauth.owner_email, action: "relay.tool.denied", path: `/relay/${pname}/${uname}`, success: false, metadata: { tool: intercepted.toolName! } });
+        rpcParamsName = intercepted.rpcParamsName;
+        rpcParams = intercepted.rpcParams;
+        if (upstream.toolDenylist?.length && intercepted.deniedToolCall) {
+          const deniedMeta = { tool: intercepted.toolName! };
+          audit.log({ identity: provider.oauth.owner_email, action: "relay.tool.denied", path: `/relay/${pname}/${uname}`, success: false, metadata: deniedMeta });
+          notifyDiscord({ action: "relay.tool.denied", metadata: deniedMeta });
           return c.json({ jsonrpc: "2.0", id: intercepted.rpc?.id ?? null, error: { code: -32601, message: `tool denied: ${intercepted.toolName}` } }, 403);
         }
       }
     }
 
     const upstreamRes = await fetch(target.toString(), { method, headers, body, redirect: "manual" });
-    audit.log({ identity: provider.oauth.owner_email, action: "relay.proxy.call", path: `/relay/${pname}/${uname}`, success: upstreamRes.ok, metadata: { status: String(upstreamRes.status), method } });
+    audit.log({
+      identity: provider.oauth.owner_email, action: "relay.proxy.call",
+      path: `/relay/${pname}/${uname}`, success: upstreamRes.ok,
+      metadata: {
+        status: String(upstreamRes.status), method,
+        tool: rpcMethod === "tools/call" ? String(rpcParamsName ?? "") : "",
+        target: rpcMethod === "tools/call" ? summarizeTarget(rpcParams) : "",
+      },
+    });
 
     const out = new Headers();
     for (const h of ["content-type", "cache-control", "mcp-session-id", "mcp-protocol-version"]) { const v = upstreamRes.headers.get(h); if (v) out.set(h, v); }
