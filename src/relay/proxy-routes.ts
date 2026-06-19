@@ -86,7 +86,7 @@ export function proxyRoutes(deps: { config: RelayConfig; managers: Record<string
     audit.log({ identity: provider.oauth.owner_email, action: "relay.proxy.call", path: `/relay/${pname}/${uname}`, success: upstreamRes.ok, metadata: { status: String(upstreamRes.status), method } });
 
     const out = new Headers();
-    for (const h of ["content-type", "cache-control"]) { const v = upstreamRes.headers.get(h); if (v) out.set(h, v); }
+    for (const h of ["content-type", "cache-control", "mcp-session-id", "mcp-protocol-version"]) { const v = upstreamRes.headers.get(h); if (v) out.set(h, v); }
 
     // --- response interception: only buffer+filter tools/list ---
     if (rpcMethod === "tools/list" && upstream.toolDenylist?.length) {

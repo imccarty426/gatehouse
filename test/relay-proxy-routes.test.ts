@@ -41,6 +41,7 @@ function makeAppWithDenylist() {
     resetUpstreamCalled: () => { upstreamCalled = false; },
     upstreamResponds: (body: object, ct = "application/json") => { responseFactory = () => new Response(JSON.stringify(body), { headers: { "content-type": ct } }); },
     upstreamRespondsSse: (body: object) => { responseFactory = () => new Response(`data: ${JSON.stringify(body)}\n\n`, { headers: { "content-type": "text/event-stream" } }); },
+    upstreamRespondsWithHeaders: (body: object, extraHeaders: Record<string, string> = {}) => { responseFactory = () => new Response(JSON.stringify(body), { headers: { "content-type": "application/json", ...extraHeaders } }); },
   };
 }
 
@@ -119,5 +120,16 @@ describe("relay proxy routes — tool denylist (Mechanism A)", () => {
     const dataLine = text.split("\n").find((l: string) => l.startsWith("data:"))!;
     const j = JSON.parse(dataLine.slice("data:".length).trim());
     expect(j.result.tools.map((t: any) => t.name)).toEqual(["search_drive_files"]);
+  });
+
+  test("Mcp-Session-Id is forwarded back from upstream response", async () => {
+    const { app, upstreamRespondsWithHeaders } = makeAppWithDenylist();
+    upstreamRespondsWithHeaders({ jsonrpc: "2.0", id: 1, result: {} }, { "mcp-session-id": "sess-123", "mcp-protocol-version": "2024-11-05" });
+    const res = await app.request("/relay/google/workspace/", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    });
+    expect(res.headers.get("mcp-session-id")).toBe("sess-123");
+    expect(res.headers.get("mcp-protocol-version")).toBe("2024-11-05");
   });
 });
