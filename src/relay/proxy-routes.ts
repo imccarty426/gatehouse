@@ -6,6 +6,33 @@ import type { AuditLog } from "../audit/logger";
 
 const HOP_BY_HOP = new Set(["connection","keep-alive","proxy-authenticate","proxy-authorization","te","trailer","transfer-encoding","upgrade","host","content-length"]);
 
+/** Parse SSE text, filter result.tools in any data: frames, re-emit valid SSE. */
+export function filterToolsInSse(text: string, denylist: string[]): string {
+  return text.split("\n").map((line) => {
+    if (!line.startsWith("data:")) return line;
+    const payload = line.slice("data:".length).trim();
+    try {
+      const obj: any = JSON.parse(payload);
+      if (Array.isArray(obj?.result?.tools)) {
+        obj.result.tools = obj.result.tools.filter((t: any) => !denylist.includes(t.name));
+      }
+      return `data: ${JSON.stringify(obj)}`;
+    } catch { return line; }
+  }).join("\n");
+}
+
+/** Parse request body as JSON-RPC. Returns metadata for interception; never throws. */
+export function interceptRequest(bodyBytes: ArrayBuffer, denylist: string[]): { deniedToolCall: boolean; rpc?: any; toolName?: string; rpcMethod?: string } {
+  try {
+    const rpc = JSON.parse(new TextDecoder().decode(bodyBytes));
+    const rpcMethod: string | undefined = rpc?.method;
+    if (rpcMethod === "tools/call" && denylist.includes(rpc?.params?.name)) {
+      return { deniedToolCall: true, rpc, toolName: String(rpc?.params?.name), rpcMethod };
+    }
+    return { deniedToolCall: false, rpc, rpcMethod };
+  } catch { return { deniedToolCall: false }; }
+}
+
 export function proxyRoutes(deps: { config: RelayConfig; managers: Record<string, TokenManager>; audit: AuditLog; publicHeader?: string }): Hono {
   const { config, managers, audit, publicHeader } = deps;
   const router = new Hono();
@@ -38,12 +65,42 @@ export function proxyRoutes(deps: { config: RelayConfig; managers: Record<string
     headers.set(provider.oauth.header_name ?? "Authorization", `Bearer ${accessToken}`);
 
     const method = c.req.method;
-    const body = (method === "GET" || method === "HEAD") ? undefined : await c.req.arrayBuffer(); // buffer small MCP requests
+
+    // --- request interception ---
+    let body: ArrayBuffer | undefined;
+    let rpcMethod: string | undefined;
+    if (method !== "GET" && method !== "HEAD") {
+      const raw = await c.req.arrayBuffer();
+      body = raw;
+      if ((c.req.header("content-type") ?? "").includes("json") && upstream.toolDenylist?.length) {
+        const intercepted = interceptRequest(raw, upstream.toolDenylist);
+        rpcMethod = intercepted.rpcMethod;
+        if (intercepted.deniedToolCall) {
+          audit.log({ identity: provider.oauth.owner_email, action: "relay.tool.denied", path: `/relay/${pname}/${uname}`, success: false, metadata: { tool: intercepted.toolName! } });
+          return c.json({ jsonrpc: "2.0", id: intercepted.rpc?.id ?? null, error: { code: -32601, message: `tool denied: ${intercepted.toolName}` } }, 403);
+        }
+      }
+    }
+
     const upstreamRes = await fetch(target.toString(), { method, headers, body, redirect: "manual" });
     audit.log({ identity: provider.oauth.owner_email, action: "relay.proxy.call", path: `/relay/${pname}/${uname}`, success: upstreamRes.ok, metadata: { status: String(upstreamRes.status), method } });
 
     const out = new Headers();
     for (const h of ["content-type", "cache-control"]) { const v = upstreamRes.headers.get(h); if (v) out.set(h, v); }
+
+    // --- response interception: only buffer+filter tools/list ---
+    if (rpcMethod === "tools/list" && upstream.toolDenylist?.length) {
+      const ct = upstreamRes.headers.get("content-type") ?? "";
+      if (ct.includes("text/event-stream")) {
+        const text = await upstreamRes.text(); // small payload; safe to buffer
+        const filtered = filterToolsInSse(text, upstream.toolDenylist);
+        return new Response(filtered, { status: upstreamRes.status, headers: out });
+      }
+      const j: any = await upstreamRes.json();
+      if (Array.isArray(j?.result?.tools)) j.result.tools = j.result.tools.filter((t: any) => !upstream.toolDenylist!.includes(t.name));
+      return new Response(JSON.stringify(j), { status: upstreamRes.status, headers: out });
+    }
+
     return new Response(upstreamRes.body, { status: upstreamRes.status, headers: out }); // stream response (no envelope, never echo Authorization)
   });
 
