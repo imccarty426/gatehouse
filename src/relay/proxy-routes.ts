@@ -6,15 +6,49 @@ import type { AuditLog } from "../audit/logger";
 
 const HOP_BY_HOP = new Set(["connection","keep-alive","proxy-authenticate","proxy-authorization","te","trailer","transfer-encoding","upgrade","host","content-length"]);
 
+/**
+ * Parse a toolDenylist entry into its components.
+ * Bare form: "toolName"         → { toolName: "toolName", scoped: false }
+ * Scoped form: "toolName:k=v"  → { toolName: "toolName", scoped: true, argKey: "k", argValue: "v" }
+ * Split on the FIRST ":" only; tool names never contain ":".
+ */
+export interface DenylistEntry {
+  toolName: string;
+  scoped: boolean;
+  argKey?: string;
+  argValue?: string;
+}
+
+export function parseDenylistEntry(entry: string): DenylistEntry {
+  const colonIdx = entry.indexOf(":");
+  if (colonIdx === -1) return { toolName: entry, scoped: false };
+  const toolName = entry.slice(0, colonIdx);
+  const rest = entry.slice(colonIdx + 1);
+  const eqIdx = rest.indexOf("=");
+  if (eqIdx === -1) return { toolName: entry, scoped: false }; // malformed; treat as bare
+  return { toolName, scoped: true, argKey: rest.slice(0, eqIdx), argValue: rest.slice(eqIdx + 1) };
+}
+
+/** Returns the set of tool names that are bare-denied (should be stripped from tools/list). */
+function bareBlockedNames(denylist: string[]): Set<string> {
+  const s = new Set<string>();
+  for (const e of denylist) {
+    const { toolName, scoped } = parseDenylistEntry(e);
+    if (!scoped) s.add(toolName);
+  }
+  return s;
+}
+
 /** Parse SSE text, filter result.tools in any data: frames, re-emit valid SSE. */
 export function filterToolsInSse(text: string, denylist: string[]): string {
+  const blocked = bareBlockedNames(denylist);
   return text.split("\n").map((line) => {
     if (!line.startsWith("data:")) return line;
     const payload = line.slice("data:".length).trim();
     try {
       const obj: any = JSON.parse(payload);
       if (Array.isArray(obj?.result?.tools)) {
-        obj.result.tools = obj.result.tools.filter((t: any) => !denylist.includes(t.name));
+        obj.result.tools = obj.result.tools.filter((t: any) => !blocked.has(t.name));
       }
       return `data: ${JSON.stringify(obj)}`;
     } catch { return line; }
@@ -63,8 +97,20 @@ export function interceptRequest(bodyBytes: ArrayBuffer, denylist: string[]): { 
     const rpcMethod: string | undefined = rpc?.method;
     const rpcParams = rpc?.params;
     const rpcParamsName: string | undefined = rpcParams?.name;
-    if (rpcMethod === "tools/call" && denylist.includes(rpcParamsName!)) {
-      return { deniedToolCall: true, rpc, toolName: String(rpcParamsName), rpcMethod, rpcParamsName, rpcParams };
+    if (rpcMethod === "tools/call" && rpcParamsName) {
+      const toolArgs = rpcParams?.arguments ?? {};
+      for (const entry of denylist) {
+        const { toolName, scoped, argKey, argValue } = parseDenylistEntry(entry);
+        if (toolName !== rpcParamsName) continue;
+        if (!scoped) {
+          // Bare entry: deny all calls to this tool
+          return { deniedToolCall: true, rpc, toolName: rpcParamsName, rpcMethod, rpcParamsName, rpcParams };
+        }
+        // Scoped entry: deny only when the argument matches
+        if (argKey && typeof toolArgs === "object" && toolArgs !== null && toolArgs[argKey] === argValue) {
+          return { deniedToolCall: true, rpc, toolName: rpcParamsName, rpcMethod, rpcParamsName, rpcParams };
+        }
+      }
     }
     return { deniedToolCall: false, rpc, rpcMethod, rpcParamsName, rpcParams };
   } catch { return { deniedToolCall: false }; }
@@ -156,7 +202,10 @@ export function proxyRoutes(deps: { config: RelayConfig; managers: Record<string
         return new Response(filtered, { status: upstreamRes.status, headers: out });
       }
       const j: any = await upstreamRes.json();
-      if (Array.isArray(j?.result?.tools)) j.result.tools = j.result.tools.filter((t: any) => !upstream.toolDenylist!.includes(t.name));
+      if (Array.isArray(j?.result?.tools)) {
+        const blocked = bareBlockedNames(upstream.toolDenylist!);
+        j.result.tools = j.result.tools.filter((t: any) => !blocked.has(t.name));
+      }
       return new Response(JSON.stringify(j), { status: upstreamRes.status, headers: out });
     }
 

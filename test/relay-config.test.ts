@@ -87,6 +87,17 @@ providers:
 `;
     expect(() => loadRelayConfig(write(yaml))).toThrow(/alertTools must be an array/);
   });
+  test("loadRelayConfig parses scoped denylist entries (toolName:argKey=argValue)", () => {
+    const yaml = `
+providers:
+  google:
+    oauth: { authorization_endpoint: https://accounts.google.com/o/oauth2/v2/auth, token_endpoint: https://oauth2.googleapis.com/token, redirect_uri: https://relay.example.com/auth/google/callback, scopes: [openid], client_id_ref: op://gatehouse/google-oauth/client_id, client_secret_ref: op://gatehouse/google-oauth/client_secret, refresh_token_ref: op://gatehouse/google-oauth/refresh_token, owner_email: x@y.z }
+    upstreams:
+      workspace: { url: "https://svc:8000/mcp/", toolDenylist: ["send_gmail_message", "manage_event:action=delete"] }
+`;
+    const cfg = loadRelayConfig(write(yaml));
+    expect(cfg.providers.google.upstreams.workspace.toolDenylist).toEqual(["send_gmail_message", "manage_event:action=delete"]);
+  });
   test("loadRelayConfig rejects alertTools with non-string entries", () => {
     const yaml = `
 providers:
