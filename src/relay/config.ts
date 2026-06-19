@@ -7,7 +7,7 @@ export interface RelayProviderOAuth {
   scopes: string[]; client_id_ref: string; client_secret_ref: string; refresh_token_ref: string;
   owner_email: string; auth_url_params?: Record<string, string>; token_url_params?: Record<string, string>; header_name?: string;
 }
-export interface RelayUpstream { url: string; }
+export interface RelayUpstream { url: string; toolDenylist?: string[] }
 export interface RelayProvider { oauth: RelayProviderOAuth; upstreams: Record<string, RelayUpstream>; }
 export interface RelayConfig { providers: Record<string, RelayProvider>; }
 
@@ -37,6 +37,8 @@ export function loadRelayConfig(path: string): RelayConfig {
     for (const [un, u] of Object.entries<any>(p.upstreams)) {
       if (!u?.url || typeof u.url !== "string") throw new Error(`relay config: provider ${name}: upstream ${un}.url is required`);
       try { new URL(u.url); } catch { throw new Error(`relay config: provider ${name}: upstream ${un}.url must be a valid URL`); }
+      if (u.toolDenylist !== undefined && (!Array.isArray(u.toolDenylist) || u.toolDenylist.some((x: any) => typeof x !== "string")))
+        throw new Error(`relay config: provider ${name}: upstream ${un}.toolDenylist must be an array of strings`);
     }
   }
   return doc as RelayConfig;
