@@ -34,9 +34,10 @@ export class TokenManager {
     let t;
     try { t = await refreshAccessToken(this.provider.oauth, id, secret, refreshToken); }
     catch (e) {
-      if (e instanceof TokenEndpointError && e.status === 400 && /invalid_grant/.test(e.body)) throw new RefreshTokenExpiredError(this.oauthName);
-      throw e;
+      if (e instanceof TokenEndpointError && e.status >= 400 && e.status < 500) throw new RefreshTokenExpiredError(this.oauthName); // any 4xx → reauth
+      throw e; // 5xx/network → transient, becomes 500
     }
+    if (!t.accessToken) throw new RefreshTokenExpiredError(this.oauthName); // empty token → reauth
     // Write back a rotated refresh token (atomic, read-back-verified) BEFORE caching the new access token, so a write-back failure never leaves us serving a token whose refresh credential wasn't persisted.
     if (t.refreshToken && t.refreshToken !== refreshToken) await this.atomicWriteBack(t.refreshToken);
     this.accessToken = t.accessToken; this.expiresAtMs = this.now() + t.expiresInSec * 1000;
