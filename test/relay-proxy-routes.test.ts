@@ -293,6 +293,148 @@ function makeAppWithAlertTools() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Helper: upstream with mixed denylist (bare + scoped entries)
+// ---------------------------------------------------------------------------
+function makeAppWithScopedDenylist() {
+  let upstreamCalled = false;
+  let responseFactory: () => Response = () =>
+    new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }), {
+      headers: { "content-type": "application/json" },
+    });
+  upstream = Bun.serve({ port: 0, async fetch() { upstreamCalled = true; return responseFactory(); } });
+  tokenSrv = Bun.serve({ port: 0, fetch: () => Response.json({ access_token: "AT-LIVE", expires_in: 3600 }) });
+  const config: RelayConfig = {
+    providers: {
+      google: {
+        oauth: {
+          authorization_endpoint: "https://x/authorize",
+          token_endpoint: `http://localhost:${tokenSrv!.port}/token`,
+          redirect_uri: "https://relay.example.com/auth/google/callback",
+          scopes: ["s1"], owner_email: "o@e.com",
+          client_id_ref: "op://v/i/cid", client_secret_ref: "op://v/i/sec", refresh_token_ref: "op://v/i/rt",
+        },
+        upstreams: {
+          workspace: {
+            url: `http://localhost:${upstream!.port}`,
+            // bare: send_gmail_message is fully blocked and stripped from tools/list
+            // scoped: manage_event is only blocked for action=delete; still visible in tools/list
+            toolDenylist: ["send_gmail_message", "manage_event:action=delete"],
+          },
+        },
+      },
+    },
+  };
+  const secrets = new MemorySecretsBackend({ "op://v/i/cid": "cid", "op://v/i/sec": "sec", "op://v/i/rt": "RT0" });
+  dir = mkdtempSync(join(tmpdir(), "relaydb-")); const db = initDB(dir);
+  const managers = { google: new TokenManager(config.providers.google, "google", secrets) };
+  const app = new Hono(); app.route("/", proxyRoutes({ config, managers, audit: new AuditLog(db) }));
+  return {
+    app,
+    getUpstreamCalled: () => upstreamCalled,
+    resetUpstreamCalled: () => { upstreamCalled = false; },
+    upstreamResponds: (body: object, ct = "application/json") => {
+      responseFactory = () => new Response(JSON.stringify(body), { headers: { "content-type": ct } });
+    },
+    upstreamRespondsSse: (body: object) => {
+      responseFactory = () => new Response(`data: ${JSON.stringify(body)}\n\n`, { headers: { "content-type": "text/event-stream" } });
+    },
+  };
+}
+
+describe("relay proxy routes — action-aware denylist (scoped rules)", () => {
+  test("scoped: tools/call manage_event {action:delete} → 403 denied, not forwarded", async () => {
+    const { app, getUpstreamCalled } = makeAppWithScopedDenylist();
+    const res = await app.request("/relay/google/workspace/", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "manage_event", arguments: { action: "delete", eventId: "ev-1" } } }),
+    });
+    expect(res.status).toBe(403);
+    const j = await res.json();
+    expect(j.error.message).toMatch(/denied/i);
+    expect(getUpstreamCalled()).toBe(false);
+  });
+
+  test("scoped: tools/call manage_event {action:create} → forwarded, NOT denied", async () => {
+    const { app, getUpstreamCalled, upstreamResponds } = makeAppWithScopedDenylist();
+    upstreamResponds({ jsonrpc: "2.0", id: 2, result: { ok: true } });
+    const res = await app.request("/relay/google/workspace/", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "manage_event", arguments: { action: "create" } } }),
+    });
+    expect(res.status).toBe(200);
+    expect(getUpstreamCalled()).toBe(true);
+    expect((await res.json()).result.ok).toBe(true);
+  });
+
+  test("scoped: tools/call manage_event {action:update} → forwarded, NOT denied", async () => {
+    const { app, getUpstreamCalled, upstreamResponds } = makeAppWithScopedDenylist();
+    upstreamResponds({ jsonrpc: "2.0", id: 3, result: { ok: true } });
+    const res = await app.request("/relay/google/workspace/", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "manage_event", arguments: { action: "update" } } }),
+    });
+    expect(res.status).toBe(200);
+    expect(getUpstreamCalled()).toBe(true);
+  });
+
+  test("scoped: tools/list still INCLUDES manage_event (only bare names are stripped)", async () => {
+    const { app, upstreamResponds } = makeAppWithScopedDenylist();
+    upstreamResponds({
+      jsonrpc: "2.0", id: 4,
+      result: { tools: [{ name: "manage_event" }, { name: "send_gmail_message" }, { name: "search_calendar" }] },
+    });
+    const res = await app.request("/relay/google/workspace/", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list" }),
+    });
+    const j = await res.json();
+    const names = j.result.tools.map((t: any) => t.name);
+    expect(names).toContain("manage_event");       // scoped: must survive
+    expect(names).not.toContain("send_gmail_message"); // bare: must be stripped
+    expect(names).toContain("search_calendar");    // untouched
+  });
+
+  test("scoped: tools/list (SSE) still INCLUDES manage_event, strips send_gmail_message", async () => {
+    const { app, upstreamRespondsSse } = makeAppWithScopedDenylist();
+    upstreamRespondsSse({
+      jsonrpc: "2.0", id: 5,
+      result: { tools: [{ name: "manage_event" }, { name: "send_gmail_message" }, { name: "search_calendar" }] },
+    });
+    const res = await app.request("/relay/google/workspace/", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/list" }),
+    });
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const text = await res.text();
+    const dataLine = text.split("\n").find((l: string) => l.startsWith("data:"))!;
+    const j = JSON.parse(dataLine.slice("data:".length).trim());
+    const names = j.result.tools.map((t: any) => t.name);
+    expect(names).toContain("manage_event");
+    expect(names).not.toContain("send_gmail_message");
+    expect(names).toContain("search_calendar");
+  });
+
+  test("bare entry send_gmail_message: tools/call → 403, tools/list removes it", async () => {
+    const { app, getUpstreamCalled, upstreamResponds } = makeAppWithScopedDenylist();
+    // Call denied
+    const callRes = await app.request("/relay/google/workspace/", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "send_gmail_message", arguments: {} } }),
+    });
+    expect(callRes.status).toBe(403);
+    expect(getUpstreamCalled()).toBe(false);
+    // List filtered
+    upstreamResponds({ jsonrpc: "2.0", id: 7, result: { tools: [{ name: "send_gmail_message" }, { name: "manage_event" }] } });
+    const listRes = await app.request("/relay/google/workspace/", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list" }),
+    });
+    const j = await listRes.json();
+    expect(j.result.tools.map((t: any) => t.name)).not.toContain("send_gmail_message");
+  });
+});
+
 describe("relay proxy routes — alertTools Discord trigger (configurable sensitive-write)", () => {
   test("allowed tools/call to alertTools tool fires Discord webhook with tool name, NOT the token", async () => {
     const discordBodies: string[] = [];
