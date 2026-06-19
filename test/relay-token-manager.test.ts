@@ -35,6 +35,18 @@ describe("TokenManager", () => {
     const ep = tokenServer(() => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }));
     await expect(new TokenManager(P(ep), "google", sec()).getAccessToken()).rejects.toBeInstanceOf(RefreshTokenExpiredError);
   });
+  test("any 400 refresh failure maps to RefreshTokenExpiredError (503)", async () => {
+    const ep = tokenServer(() => new Response(JSON.stringify({ error: "bad_request" }), { status: 400 }));
+    await expect(new TokenManager(P(ep), "google", sec()).getAccessToken()).rejects.toBeInstanceOf(RefreshTokenExpiredError);
+  });
+  test("empty access_token in 200 response maps to RefreshTokenExpiredError", async () => {
+    const ep = tokenServer(() => ({ access_token: "", expires_in: 3600 }));
+    await expect(new TokenManager(P(ep), "google", sec()).getAccessToken()).rejects.toBeInstanceOf(RefreshTokenExpiredError);
+  });
+  test("5xx token-endpoint error is transient (re-thrown, NOT reauth)", async () => {
+    const ep = tokenServer(() => new Response("upstream down", { status: 503 }));
+    await expect(new TokenManager(P(ep), "google", sec()).getAccessToken()).rejects.not.toBeInstanceOf(RefreshTokenExpiredError);
+  });
   test("exchangeForIdentity returns email but does NOT persist until commit()", async () => {
     const idt = "h." + Buffer.from(JSON.stringify({ email: "owner@e.com" })).toString("base64url") + ".s";
     const ep = tokenServer((f) => f.get("grant_type") === "authorization_code" ? { access_token: "AT", refresh_token: "RT-NEW", expires_in: 3600, id_token: idt } : { access_token: "AT", expires_in: 3600 });

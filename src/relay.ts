@@ -17,7 +17,31 @@ export function buildRelayApp(deps: { config: RelayConfig; managers: Record<stri
   return app;
 }
 
-function bootstrap() {
+/**
+ * Prime each provider's OAuth token before the relay starts serving.
+ * Guards against the Cilium toFQDNs first-call race: the first outbound request
+ * after a pod restart can 500 before the DNS policy has been resolved and cached.
+ * Retries up to 5 times with 500 ms backoff; swallows all errors so a stale or
+ * unconfigured provider never prevents startup.
+ */
+export async function warmup(managers: Record<string, { getAccessToken: () => Promise<string> }>): Promise<void> {
+  for (const [name, m] of Object.entries(managers)) {
+    for (let i = 0; i < 5; i++) {
+      try {
+        await m.getAccessToken();
+        break;
+      } catch (e) {
+        if (i === 4) {
+          console.warn(`[gatehouse-relay] warmup ${name} gave up after 5 attempts: ${e}`);
+        } else {
+          await new Promise<void>((r) => setTimeout(r, 500));
+        }
+      }
+    }
+  }
+}
+
+async function bootstrap() {
   const env = loadRelayEnv();
   const config = loadRelayConfig(env.relayConfigPath);
   const db = initDB(env.dataDir);
@@ -25,9 +49,10 @@ function bootstrap() {
   const secrets = new OnePasswordBackend({ token: env.opToken });
   const managers: Record<string, TokenManager> = {};
   for (const [name, provider] of Object.entries(config.providers)) managers[name] = new TokenManager(provider, name, secrets);
+  await warmup(managers);
   console.log(`[gatehouse-relay] listening on :${env.port}`);
   return { app: buildRelayApp({ config, managers, db, audit, publicHeader: env.publicHeader }), port: env.port };
 }
 
-const { app, port } = import.meta.main ? bootstrap() : { app: new Hono(), port: 0 };
+const { app, port } = import.meta.main ? await bootstrap() : { app: new Hono(), port: 0 };
 export default { port, fetch: app.fetch };

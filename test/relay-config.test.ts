@@ -47,4 +47,53 @@ describe("loadRelayConfig", () => {
   test("throws on missing file", () => {
     expect(() => loadRelayConfig(join(dir, "nope.yaml"))).toThrow();
   });
+  test("loadRelayConfig parses per-upstream toolDenylist", () => {
+    const yaml = `
+providers:
+  google:
+    oauth: { authorization_endpoint: https://accounts.google.com/o/oauth2/v2/auth, token_endpoint: https://oauth2.googleapis.com/token, redirect_uri: https://relay.example.com/auth/google/callback, scopes: [openid], client_id_ref: op://gatehouse/google-oauth/client_id, client_secret_ref: op://gatehouse/google-oauth/client_secret, refresh_token_ref: op://gatehouse/google-oauth/refresh_token, owner_email: x@y.z }
+    upstreams:
+      workspace: { url: "https://svc:8000/mcp/", toolDenylist: ["send_message", "delete_file"] }
+`;
+    const cfg = loadRelayConfig(write(yaml));
+    expect(cfg.providers.google.upstreams.workspace.toolDenylist).toEqual(["send_message", "delete_file"]);
+  });
+  test("loadRelayConfig rejects non-array toolDenylist", () => {
+    const yaml = `
+providers:
+  google:
+    oauth: { authorization_endpoint: https://accounts.google.com/o/oauth2/v2/auth, token_endpoint: https://oauth2.googleapis.com/token, redirect_uri: https://relay.example.com/auth/google/callback, scopes: [openid], client_id_ref: op://gatehouse/google-oauth/client_id, client_secret_ref: op://gatehouse/google-oauth/client_secret, refresh_token_ref: op://gatehouse/google-oauth/refresh_token, owner_email: x@y.z }
+    upstreams: { workspace: { url: "https://svc:8000/mcp/", toolDenylist: "nope" } }
+`;
+    expect(() => loadRelayConfig(write(yaml))).toThrow(/toolDenylist must be an array/);
+  });
+  test("loadRelayConfig parses per-upstream alertTools", () => {
+    const yaml = `
+providers:
+  google:
+    oauth: { authorization_endpoint: https://accounts.google.com/o/oauth2/v2/auth, token_endpoint: https://oauth2.googleapis.com/token, redirect_uri: https://relay.example.com/auth/google/callback, scopes: [openid], client_id_ref: op://gatehouse/google-oauth/client_id, client_secret_ref: op://gatehouse/google-oauth/client_secret, refresh_token_ref: op://gatehouse/google-oauth/refresh_token, owner_email: x@y.z }
+    upstreams:
+      workspace: { url: "https://svc:8000/mcp/", alertTools: ["share_file", "move_file"] }
+`;
+    const cfg = loadRelayConfig(write(yaml));
+    expect(cfg.providers.google.upstreams.workspace.alertTools).toEqual(["share_file", "move_file"]);
+  });
+  test("loadRelayConfig rejects non-array alertTools", () => {
+    const yaml = `
+providers:
+  google:
+    oauth: { authorization_endpoint: https://accounts.google.com/o/oauth2/v2/auth, token_endpoint: https://oauth2.googleapis.com/token, redirect_uri: https://relay.example.com/auth/google/callback, scopes: [openid], client_id_ref: op://gatehouse/google-oauth/client_id, client_secret_ref: op://gatehouse/google-oauth/client_secret, refresh_token_ref: op://gatehouse/google-oauth/refresh_token, owner_email: x@y.z }
+    upstreams: { workspace: { url: "https://svc:8000/mcp/", alertTools: "nope" } }
+`;
+    expect(() => loadRelayConfig(write(yaml))).toThrow(/alertTools must be an array/);
+  });
+  test("loadRelayConfig rejects alertTools with non-string entries", () => {
+    const yaml = `
+providers:
+  google:
+    oauth: { authorization_endpoint: https://accounts.google.com/o/oauth2/v2/auth, token_endpoint: https://oauth2.googleapis.com/token, redirect_uri: https://relay.example.com/auth/google/callback, scopes: [openid], client_id_ref: op://gatehouse/google-oauth/client_id, client_secret_ref: op://gatehouse/google-oauth/client_secret, refresh_token_ref: op://gatehouse/google-oauth/refresh_token, owner_email: x@y.z }
+    upstreams: { workspace: { url: "https://svc:8000/mcp/", alertTools: [42] } }
+`;
+    expect(() => loadRelayConfig(write(yaml))).toThrow(/alertTools must be an array/);
+  });
 });
