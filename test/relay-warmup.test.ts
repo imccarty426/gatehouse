@@ -25,8 +25,8 @@ describe("warmup", () => {
     const mgrs = {
       failing: { getAccessToken: async () => { throw new Error("DNS not ready yet"); } },
     };
-    // warmup must resolve, not reject
-    await expect(warmup(mgrs as any)).resolves.toBeUndefined();
+    // warmup must resolve, not reject (baseDelayMs=1 keeps the 5-attempt backoff fast in-test)
+    await expect(warmup(mgrs as any, 1)).resolves.toBeUndefined();
   });
 
   test("succeeds on retry after transient failure", async () => {
@@ -42,7 +42,7 @@ describe("warmup", () => {
         },
       },
     };
-    await warmup(mgrs as any);
+    await warmup(mgrs as any, 1);
     expect(calls).toContain("flaky");
   });
 });
