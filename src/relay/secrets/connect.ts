@@ -46,7 +46,18 @@ export class ConnectBackend implements SecretsBackend {
     return f.value ?? "";
   }
 
-  async put(_ref: string, _value: string): Promise<void> {
-    throw new Error("ConnectBackend.put not implemented"); // Task A2
+  // Connect (connect-sdk-js parity) has no field-level JSON-Patch — update is
+  // whole-item PUT. We fetch the FULL item, mutate ONLY the target field, and
+  // PUT it back, so sibling fields (client-id/secret) are preserved by
+  // construction. The refresh-token field keeps its CONCEALED type.
+  async put(ref: string, value: string): Promise<void> {
+    const { vault, item, field } = parseRef(ref);
+    const { vaultId, itemId } = await this.locate(vault, item);
+    const full = await this.api(`/vaults/${vaultId}/items/${itemId}`);
+    const f = (full.fields ?? []).find((x: any) => x.label === field || x.id === field);
+    if (!f) throw new Error(`connect: field not found: ${vault}/${item}/${field}`);
+    f.value = value;
+    f.type = "CONCEALED"; // never downgrade the secret's type on write
+    await this.api(`/vaults/${vaultId}/items/${itemId}`, { method: "PUT", body: JSON.stringify(full) });
   }
 }
