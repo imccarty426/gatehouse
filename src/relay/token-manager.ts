@@ -2,6 +2,7 @@
 import type { RelayProvider } from "./config";
 import type { SecretsBackend } from "./secrets/types";
 import { exchangeCodeForTokens, refreshAccessToken, TokenEndpointError } from "./oauth";
+import { recordRefreshSuccess, recordRefreshFailure } from "../metrics";
 
 export class RefreshTokenExpiredError extends Error {
   constructor(public oauthName: string) { super(`refresh token expired/invalid for '${oauthName}'`); this.name = "RefreshTokenExpiredError"; }
@@ -29,19 +30,25 @@ export class TokenManager {
   }
 
   private async doRefresh(): Promise<string> {
-    const { id, secret } = await this.creds();
-    const refreshToken = await this.secrets.resolve(this.provider.oauth.refresh_token_ref);
-    let t;
-    try { t = await refreshAccessToken(this.provider.oauth, id, secret, refreshToken); }
-    catch (e) {
-      if (e instanceof TokenEndpointError && e.status >= 400 && e.status < 500) throw new RefreshTokenExpiredError(this.oauthName); // any 4xx → reauth
-      throw e; // 5xx/network → transient, becomes 500
+    try {
+      const { id, secret } = await this.creds();
+      const refreshToken = await this.secrets.resolve(this.provider.oauth.refresh_token_ref);
+      let t;
+      try { t = await refreshAccessToken(this.provider.oauth, id, secret, refreshToken); }
+      catch (e) {
+        if (e instanceof TokenEndpointError && e.status >= 400 && e.status < 500) throw new RefreshTokenExpiredError(this.oauthName); // any 4xx → reauth
+        throw e; // 5xx/network → transient, becomes 500
+      }
+      if (!t.accessToken) throw new RefreshTokenExpiredError(this.oauthName); // empty token → reauth
+      // Write back a rotated refresh token (atomic, read-back-verified) BEFORE caching the new access token, so a write-back failure never leaves us serving a token whose refresh credential wasn't persisted.
+      if (t.refreshToken && t.refreshToken !== refreshToken) await this.atomicWriteBack(t.refreshToken);
+      this.accessToken = t.accessToken; this.expiresAtMs = this.now() + t.expiresInSec * 1000;
+      recordRefreshSuccess(Math.floor(this.now() / 1000)); // observability: last-success gauge
+      return t.accessToken;
+    } catch (e) {
+      recordRefreshFailure(); // observability: any refresh failure (rate-limit, expired, network, write-back) feeds the alert
+      throw e;
     }
-    if (!t.accessToken) throw new RefreshTokenExpiredError(this.oauthName); // empty token → reauth
-    // Write back a rotated refresh token (atomic, read-back-verified) BEFORE caching the new access token, so a write-back failure never leaves us serving a token whose refresh credential wasn't persisted.
-    if (t.refreshToken && t.refreshToken !== refreshToken) await this.atomicWriteBack(t.refreshToken);
-    this.accessToken = t.accessToken; this.expiresAtMs = this.now() + t.expiresInSec * 1000;
-    return t.accessToken;
   }
 
   /** Persist then read-back-verify; never discard the working token until confirmed. */
