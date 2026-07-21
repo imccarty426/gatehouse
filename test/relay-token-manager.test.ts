@@ -57,4 +57,20 @@ describe("TokenManager", () => {
     await r.commit();
     expect(await s.resolve("op://v/i/rt")).toBe("RT-NEW"); // persisted (atomic, read-back-verified)
   });
+
+  test("atomicWriteBack tolerates delayed read-your-writes (verify retries)", async () => {
+    // Connect is a sync-cache: the first read after a write may lag one call behind.
+    class LaggyBackend extends MemorySecretsBackend {
+      private lag = new Set<string>();
+      async put(ref: string, v: string) { this.lag.add(ref); await super.put(ref, v); }
+      async resolve(ref: string) { if (this.lag.has(ref)) { this.lag.delete(ref); return "STALE"; } return super.resolve(ref); }
+    }
+    const s = new LaggyBackend({ "op://v/i/cid": "cid", "op://v/i/sec": "sec", "op://v/i/rt": "RT0" });
+    const idt = "h." + Buffer.from(JSON.stringify({ email: "owner@e.com" })).toString("base64url") + ".s";
+    const ep = tokenServer((f) => f.get("grant_type") === "authorization_code"
+      ? { access_token: "AT", refresh_token: "RT-NEW", expires_in: 3600, id_token: idt } : { access_token: "AT", expires_in: 3600 });
+    const r = await new TokenManager(P(ep), "google", s).exchangeForIdentity("code", "ver");
+    await r.commit(); // must NOT throw despite the one stale read
+    expect(await s.resolve("op://v/i/rt")).toBe("RT-NEW");
+  });
 });

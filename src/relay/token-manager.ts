@@ -48,7 +48,15 @@ export class TokenManager {
   private async atomicWriteBack(newToken: string): Promise<void> {
     const ref = this.provider.oauth.refresh_token_ref;
     await this.secrets.put(ref, newToken);
-    if ((await this.secrets.resolve(ref)) !== newToken) throw new Error(`refresh-token write-back verification failed for '${this.oauthName}'`);
+    // Connect is a sync-cache with no read-your-writes guarantee: the verify read
+    // may lag the write briefly. Retry with backoff before failing; the accept
+    // condition stays strict equality, so a retry can never accept a bad write.
+    let delay = 200;
+    for (let i = 0; i < 5; i++) {
+      if ((await this.secrets.resolve(ref)) === newToken) return;
+      if (i < 4) { await new Promise<void>((r) => setTimeout(r, delay)); delay = Math.min(delay * 2, 3000); }
+    }
+    throw new Error(`refresh-token write-back verification failed for '${this.oauthName}'`);
   }
 
   async exchangeForIdentity(code: string, codeVerifier: string): Promise<{ email?: string; commit: () => Promise<void> }> {
