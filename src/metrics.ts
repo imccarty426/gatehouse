@@ -7,6 +7,8 @@ let refreshFailures = 0;
 
 export function recordRefreshSuccess(nowSec: number): void { lastSuccessSec = nowSec; }
 export function recordRefreshFailure(): void { refreshFailures++; }
+/** Test-only: reset module state (metrics are process-global singletons). */
+export function resetMetricsForTest(): void { lastSuccessSec = 0; refreshFailures = 0; }
 
 export function renderMetrics(): string {
   const lines = [
